@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="sv" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Magen – Smärta, Kiss & Vätska</title>
+
+  <!-- Ikoner -->
+  <link rel="icon" href="/favicon.png" sizes="64x64" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+  <link rel="manifest" href="/manifest.webmanifest">
+
+<!-- (valfritt men bra på mobiler) -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#111218">
+
+  <!--
+    Magen – Offline webbapp i en fil (index.html)
+
+    Datamodell (lagras i IndexedDB):
+      storage.version = "1"
+      painLogs: Array<PainEntry>
+        PainEntry {
+          id: string (uuid)
+          timestamp: string (ISO 8601 lokal, ej tidszonskonverterad)
+          datum: string (YYYY-MM-DD)
+          tid: string (HH:mm)
+          typ: "magont" | "livmoder-ont"
+          niva: 1..10
+          meds: string[]  // valfritt för alla typer; värden från ["ibuprofen","paracetamol","naproxen"]
+          med_effekt: "ja" | "delvis" | "nej" | "vet ej" | null // visas endast om meds.length>0
+          med_effekt_minuter: number | null // 0–240, visas om med_effekt i [ja,delvis]
+          anteckning: string
+        }
+      peeLogs: Array<PeeEntry>
+        PeeEntry {
+          id: string
+          timestamp: string (ISO 8601 lokal)
+        }
+      fluidLogs: Array<FluidEntry>
+        FluidEntry {
+          id: string
+          timestamp: string (ISO 8601 lokal)
+          volym_ml: number
+          dryck: string
+        }
+      settings: {
+        tema: "light" | "dark",
+        smärtskala: Record<1..10, string>,
+        vatska_mal_ml: number // utökning: dagligt mål för vätska (standard 2000 ml)
+      }
+
+    Färger: justera CSS-variabler i :root och [data-theme="dark"]. Primärt rosa & lila.
+
+    Struktur: Moduler i IIFE: Storage, State, Utils, CSV, Charts, UI, App.
+
+    Sekretess: Ingen data lämnar din dator. Export/Import sker lokalt via CSV-filer.
+  -->
+  
+</head>
+<body>
+  <div id="dev-states" aria-hidden="true" aria-label="Debug states">
+    <p class="state state-loading">Loading…</p>
+    <p class="state state-empty">No data</p>
+    <p class="state state-error">Error</p>
+    <p class="state state-success">Success</p>
+  </div>
+  <header class="appbar" role="banner">
+    <div class="appbar-inner" aria-label="Toppfält">
+      <div class="title" aria-label="Appnamn">Magen</div>
+      <div class="spacer"></div>
+      <div class="toolbar" role="toolbar" aria-label="Verktyg">
+        <button id="btnExport" class="btn secondary" title="Exportera CSV" aria-label="Exportera CSV">Exportera</button>
+        <button id="btnImport" class="btn secondary" title="Importera CSV" aria-label="Importera CSV">Importera</button>
+        <button id="btnSettings" class="btn ghost" title="Inställningar" aria-label="Öppna inställningar">Inställningar</button>
+        <button id="btnClear" class="btn danger" title="Rensa all data" aria-label="Rensa all data">Rensa data</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <p id="privacyBanner" class="banner" role="status" aria-live="polite" hidden>
+      Dina uppgifter sparas endast lokalt i denna webbapp.
+    </p>
+
+    <!-- Start/Dashboard -->
+    <section id="dashboard" aria-label="Start">
+      <div class="home-grid">
+        <div class="home-card" id="cardPain" role="button" tabindex="0" aria-label="Öppna Smärta">
+          <div class="big">💢 Smärta</div>
+          <div class="meta">Logga tillfälle, se lista och grafik</div>
+        </div>
+        <div class="home-card" id="cardPee" role="button" tabindex="0" aria-label="Öppna Kiss">
+          <div class="big">🚻 Kiss</div>
+          <div class="meta">Snabbt "nu" eller vald tid</div>
+        </div>
+        <div class="home-card" id="cardFluid" role="button" tabindex="0" aria-label="Öppna Vätska">
+          <div class="big">💧 Vätska</div>
+          <div class="meta">Följ intag och mål</div>
+        </div>
+        <div class="home-card" id="cardStats" role="button" tabindex="0" aria-label="Öppna Statistik">
+          <div class="big">📊 Statistik</div>
+          <div class="meta">Översikt över allt</div>
+        </div>
+      </div>
+    </section>
+
+    <nav class="tabs" aria-label="Flikar" hidden aria-hidden="true">
+      <div class="tablist" role="tablist">
+        <button class="btn tab-active" role="tab" aria-selected="true" aria-controls="tab-smarta" id="tabbtn-smarta">Smärta</button>
+        <button class="btn" role="tab" aria-selected="false" aria-controls="tab-kiss" id="tabbtn-kiss">Kiss</button>
+        <button class="btn" role="tab" aria-selected="false" aria-controls="tab-vatska" id="tabbtn-vatska">Vätska</button>
+        <button class="btn" role="tab" aria-selected="false" aria-controls="tab-stat" id="tabbtn-stat">Statistik</button>
+      </div>
+    </nav>
+
+    <!-- Smärta -->
+    <section id="tab-smarta" role="tabpanel" aria-labelledby="tabbtn-smarta">
+      <div class="grid grid-2">
+        <div class="card" id="painFormCard">
+          <h3>Logga smärta</h3>
+          <div class="row" style="align-items:center;">
+            <div class="help">Öppna bladet för att registrera ett tillfälle.</div>
+            <div class="spacer"></div>
+            <button id="openPainSheet" class="btn ok" type="button" title="Öppna smärtblad">Öppna blad</button>
+          </div>
+        </div>
+
+        <div class="card filters">
+          <details>
+            <summary>Filter & sök</summary>
+            <form id="painFilters" style="margin-top:10px;">
+              <div class="row">
+                <div>
+                  <label for="fFrom">Från</label>
+                  <input id="fFrom" type="date" />
+                </div>
+                <div>
+                  <label for="fTo">Till</label>
+                  <input id="fTo" type="date" />
+                </div>
+              </div>
+              <div class="row">
+                <div>
+                  <label>Typ</label>
+                  <div class="row">
+                    <label><input type="checkbox" id="fMagont" checked /> Magont</label>
+                    <label><input type="checkbox" id="fLivmoder" checked /> Livmoder‑ont</label>
+                  </div>
+                </div>
+                <div>
+                  <label>Nivåintervall</label>
+                  <div class="row">
+                    <input type="number" id="fMin" min="1" max="10" value="1" />
+                    <input type="number" id="fMax" min="1" max="10" value="10" />
+                  </div>
+                </div>
+              </div>
+              <div class="row">
+                <div>
+                  <label for="fMeds">Läkemedel</label>
+                  <select id="fMeds">
+                    <option value="alla">Alla</option>
+                    <option value="har">Har</option>
+                    <option value="harinte">Har inte</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="fEffekt">Effekt</label>
+                  <select id="fEffekt">
+                    <option value="alla">Alla</option>
+                    <option value="ja">Ja</option>
+                    <option value="delvis">Delvis</option>
+                    <option value="nej">Nej</option>
+                    <option value="vet ej">Vet ej</option>
+                  </select>
+                </div>
+              </div>
+              <div class="row">
+                <div>
+                  <label for="fSok">Söktext (anteckning)</label>
+                  <input id="fSok" type="text" placeholder="t.ex. knip" />
+                </div>
+                <div class="row" style="align-items: flex-end;">
+                  <button class="btn ghost" id="btnClrFilter" type="button">Nollställ</button>
+                  <button class="btn" id="btnApplyFilter" type="button">Använd</button>
+                </div>
+              </div>
+            </form>
+          </details>
+        </div>
+      </div>
+
+      <div class="grid grid-2" style="margin-top:10px;">
+        <div class="card">
+          <h3>Lista</h3>
+          <div id="painList" class="list-group" aria-live="polite"></div>
+          <div id="painEmpty" class="muted" hidden>Inget registrerat ännu. Lägg till i formuläret ovan.</div>
+        </div>
+        <div class="card">
+          <h3>Grafik</h3>
+          <div class="canvas-wrap">
+            <canvas id="painLine"></canvas>
+          </div>
+          <div class="canvas-wrap" style="margin-top:10px;">
+            <canvas id="painBars"></canvas>
+          </div>
+          <div class="canvas-wrap" style="margin-top:10px;">
+            <canvas id="painMeds"></canvas>
+          </div>
+          <div class="canvas-wrap" style="margin-top:10px;">
+            <canvas id="painBox"></canvas>          </div>          <div class="canvas-wrap" style="margin-top:10px;">
+            <canvas id="painDuration"></canvas>
+          </div>
+
+
+
+        </div>
+      </div>
+    </section>
+
+    <!-- Kiss -->
+    <section id="tab-kiss" role="tabpanel" aria-labelledby="tabbtn-kiss" hidden>
+      <div class="grid grid-2">
+        <div class="card soft">
+          <h3>Snabb kiss</h3>
+          <div class="hero">
+            <div class="emoji">🚻</div>
+            <div class="help">Tryck för att registrera nu, eller planera tid.</div>
+            <div class="row" style="gap:8px; justify-content:flex-end;">
+              <button id="peeQuickNow" class="btn ok" type="button">Lägg till nu</button>
+              <button id="openPeeSheet" class="btn" type="button">Planera</button>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Grafik</h3>
+          <div class="canvas-wrap">
+            <canvas id="peeBars"></canvas>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:10px;">
+        <h3>Lista</h3>
+        <div id="peeList" class="list-group" aria-live="polite"></div>
+        <div id="peeEmpty" class="muted" hidden>Inget registrerat ännu. Tryck "Lägg till nu".</div>
+      </div>
+    </section>
+
+    <!-- Vätska -->
+    <section id="tab-vatska" role="tabpanel" aria-labelledby="tabbtn-vatska" hidden>
+      <div class="grid grid-2">
+        <div class="card soft">
+          <h3>Mål & snabbadd</h3>
+          <div class="row" style="align-items:center;">
+            <div class="help">Dagligt mål: <span id="goalMirror">2000</span> ml</div>
+            <div class="spacer"></div>
+            <button id="openFluidSheet" class="btn ok" type="button">Lägg till</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Grafik</h3>
+          <div class="canvas-wrap">
+            <canvas id="fluidBars"></canvas>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:10px;">
+        <h3>Lista</h3>
+        <div id="fluidList" class="list-group" aria-live="polite"></div>
+        <div id="fluidEmpty" class="muted" hidden>Inget registrerat ännu. Lägg till i formuläret ovan.</div>
+      </div>
+    </section>
+
+    <!-- Statistik -->
+    <section id="tab-stat" role="tabpanel" aria-labelledby="tabbtn-stat" hidden>
+      <div class="row" id="statPainTypeBtns" style="gap:4px;margin-bottom:10px;">
+        <button class="btn stat-pain-btn tab-active" data-type="both">Båda</button>
+        <button class="btn stat-pain-btn" data-type="magont">Magont</button>
+        <button class="btn stat-pain-btn" data-type="livmoder-ont">Livmoder-ont</button>
+      </div>
+      <div class="grid grid-2">
+        <div class="card">
+          <h3>Smärta – nivå över tid</h3>
+          <div class="canvas-wrap"><canvas id="painLine2"></canvas></div>
+        </div>
+        <div class="card">
+          <h3>Smärta – loggar per dag</h3>
+          <div class="canvas-wrap"><canvas id="painBars2"></canvas></div>
+        </div>
+        <div class="card">
+          <h3>Smärta – läkemedel</h3>
+          <div class="canvas-wrap"><canvas id="painMeds2"></canvas></div>
+        </div>
+        <div class="card">
+          <h3>Smärta – sammanlagd tid per dag (min)</h3>
+          <div class="canvas-wrap"><canvas id="painDuration2"></canvas></div>
+        </div>
+
+        <div class="card">
+          <h3>Smärta – median/medel per dag</h3>
+          <div class="canvas-wrap"><canvas id="painBox2"></canvas></div>
+        </div>
+        <div class="card">
+          <h3>Kiss – antal per dag</h3>
+          <div class="canvas-wrap"><canvas id="peeBars2"></canvas></div>
+        </div>
+        <div class="card">
+          <h3>Vätska – ml per dag</h3>
+          <div class="canvas-wrap"><canvas id="fluidBars2"></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <div id="liveRegion" class="sr-only" aria-live="polite" aria-atomic="true" style="position:absolute;left:-9999px;">&nbsp;</div>
+  </main>
+
+  <footer>
+    <div>Denna app ersätter inte medicinsk rådgivning.</div>
+  </footer>
+
+  <!-- Modaler -->
+  <div id="modalBackdrop" class="modal-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="modal" role="document">
+      <div id="modalContent"></div>
+      <div class="row" style="margin-top:12px; justify-content: flex-end;">
+        <button class="btn ghost" id="modalClose">Stäng</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom sheets -->
+  <div id="painSheet" class="sheet-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="sheet" role="document">
+      <div class="sheet-header">
+        <strong>Hej! Logga smärta</strong>
+        <div class="spacer"></div>
+        <button class="btn ghost" type="button" id="closePainSheet">Stäng</button>
+      </div>
+      <div class="sheet-body">
+        <form id="painForm" autocomplete="off">
+          <div class="row">
+            <div class="field-card">
+              <label for="painDate">Datum</label>
+              <input id="painDate" type="date" required />
+            </div>
+            <div class="field-card">
+              <label for="painStart">Starttid</label>
+              <input id="painStart" type="time" step="60" required />
+            </div>
+            <div class="field-card">
+              <label for="painEnd">Sluttid (valfritt)</label>
+              <input id="painEnd" type="time" step="60" />
+            </div>
+          </div>
+          <div class="row">
+            <fieldset style="border:0;padding:0;margin:0; width:100%">
+              <legend class="section-title">Typ</legend>
+              <div class="chip-group">
+                <label class="chip"><input type="radio" name="painType" value="magont" checked /><span>Magont</span></label>
+                <label class="chip"><input type="radio" name="painType" value="livmoder-ont" /><span>Livmoder‑ont</span></label>
+              </div>
+            </fieldset>
+          </div>
+          <div>
+            <div class="row" style="align-items:center;">
+              <label for="painLevel" style="flex:0 0 auto">Nivå (1–10)</label>
+              <span id="painLevelBadge" class="level-badge" aria-live="polite" title="Aktuell nivå">4</span>
+            </div>
+            <input id="painLevel" type="range" min="1" max="10" value="4" list="ticks10" />
+            <datalist id="ticks10">
+              <option value="1"></option><option value="2"></option><option value="3"></option><option value="4"></option><option value="5"></option><option value="6"></option><option value="7"></option><option value="8"></option><option value="9"></option><option value="10"></option>
+            </datalist>
+            <div class="range-meta"><span>1</span><span>10</span></div>
+            <div id="painScaleText" class="scale-note">Beskrivning visas här…</div>
+          </div>
+
+          <div id="painMedsSection" hidden>
+            <div class="section-title">Smärtlindring</div>
+            <div class="chip-group">
+              <label class="chip"><input type="checkbox" value="ibuprofen" class="medsChk" /> <span>ibuprofen</span></label>
+              <label class="chip"><input type="checkbox" value="paracetamol" class="medsChk" /> <span>paracetamol</span></label>
+              <label class="chip"><input type="checkbox" value="naproxen" class="medsChk" /> <span>naproxen</span></label>
+            </div>
+            <fieldset style="border:0;padding:0;margin-top:8px;">
+              <legend class="section-title">Effekt</legend>
+              <div class="chip-group">
+                <label class="chip"><input type="radio" name="medEffekt" value="ja" disabled /> <span>Ja</span></label>
+                <label class="chip"><input type="radio" name="medEffekt" value="delvis" disabled /> <span>Delvis</span></label>
+                <label class="chip"><input type="radio" name="medEffekt" value="nej" disabled /> <span>Nej</span></label>
+                <label class="chip"><input type="radio" name="medEffekt" value="vet ej" disabled /> <span>Vet ej</span></label>
+              </div>
+              <div class="row" style="margin-top:6px;">
+                <div class="field-card">
+                  <label for="effektMin">Efter hur länge? (min)</label>
+                  <input id="effektMin" type="number" min="0" max="240" step="1" placeholder="t.ex. 45" disabled />
+                </div>
+              </div>
+            </fieldset>
+          </div>
+
+          <div style="margin-top:10px;">
+            <label for="painNote">Anteckning</label>
+            <textarea id="painNote" placeholder="Kort notis…"></textarea>
+          </div>
+
+          <div class="sheet-actions">
+            <button class="btn ghost" type="button" id="closePainSheet2">Stäng</button>
+            <button class="btn ok" type="submit" title="Lägg till smärtlogg">Lägg till</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="peeSheet" class="sheet-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="sheet" role="document">
+      <div class="sheet-header">
+        <strong>Registrera kiss</strong>
+        <div class="spacer"></div>
+        <button class="btn ghost" type="button" id="closePeeSheet">Stäng</button>
+      </div>
+      <div class="sheet-body">
+        <div class="row" style="margin-bottom:8px;">
+          <button id="btnPeeNow" class="btn ok" title="Lägg till med aktuell tid" type="button">Lägg till nu</button>
+          <div class="spacer"></div>
+        </div>
+        <div class="row">
+          <div class="field-card">
+            <label for="peeDate">Datum</label>
+            <input id="peeDate" type="date" />
+          </div>
+          <div class="field-card">
+            <label for="peeTime">Tid</label>
+            <input id="peeTime" type="time" step="60" />
+          </div>
+          <div style="align-self: flex-end;">
+            <button id="btnPeeAdd" class="btn" title="Lägg till vald tid" type="button">Lägg till</button>
+          </div>
+        </div>
+        <div class="sheet-actions">
+          <button class="btn ghost" type="button" id="closePeeSheet2">Stäng</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="fluidSheet" class="sheet-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="sheet" role="document">
+      <div class="sheet-header">
+        <strong>Registrera vätska</strong>
+        <div class="spacer"></div>
+        <button class="btn ghost" type="button" id="closeFluidSheet">Stäng</button>
+      </div>
+      <div class="sheet-body">
+        <form id="fluidForm">
+          <div class="row">
+            <div class="field-card">
+              <label for="fluidDate">Datum</label>
+              <input id="fluidDate" type="date" required />
+            </div>
+            <div class="field-card">
+              <label for="fluidTime">Tid</label>
+              <input id="fluidTime" type="time" step="60" required />
+            </div>
+          </div>
+          <div class="row">
+            <div class="field-card">
+              <label for="fluidVol">Volym (ml)</label>
+              <input id="fluidVol" type="number" min="1" max="5000" step="1" required placeholder="t.ex. 300" />
+            </div>
+            <div class="field-card">
+              <label for="fluidType">Dryck (valfritt)</label>
+              <input id="fluidType" type="text" placeholder="t.ex. vatten" />
+            </div>
+          </div>
+          <div class="row" style="margin-top:12px;">
+            <div class="help">Dagligt mål: <span id="goalMl">2000</span> ml</div>
+            <div class="spacer"></div>
+          </div>
+          <div class="sheet-actions">
+            <button class="btn ghost" type="button" id="closeFluidSheet2">Stäng</button>
+            <button class="btn ok" type="submit">Lägg till</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="quickSheet" class="sheet-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="sheet" role="document">
+      <div class="sheet-header">
+        <strong>Snabblogga</strong>
+        <div class="spacer"></div>
+        <button class="btn ghost" type="button" id="closeQuickSheet">Stäng</button>
+      </div>
+      <div class="sheet-body">
+        <div class="grid">
+          <button class="btn ok" type="button" id="quickPain">+ Smärta</button>
+          <button class="btn secondary" type="button" id="quickPee">+ Kiss nu</button>
+          <button class="btn" type="button" id="quickFluid">+ Vätska</button>
+        </div>
+        <div class="sheet-actions">
+          <button class="btn ghost" type="button" id="closeQuickSheet2">Stäng</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="snackbar" class="snackbar" role="status" aria-live="polite">
+    <span id="snackText"></span>
+    <button id="snackUndo" class="btn ghost">Ångra</button>
+  </div>
+
+  <div id="chartTooltip" class="tooltip" role="tooltip"></div>
+
+  <!-- Floating actions & bottom bar -->
+  <button class="fab" id="fabQuick" aria-label="Snabblogga">+</button>
+  <nav class="bottom-bar" role="navigation" aria-label="Snabbnavigering">
+    <div class="bottom-bar-inner">
+      <button id="navHome" class="bar-btn active" type="button" aria-label="Hem">🏠 Hem</button>
+      <button id="navLog" class="bar-btn" type="button" aria-label="Logga">✚ Logga</button>
+      <button id="navStats" class="bar-btn" type="button" aria-label="Statistik">📊 Statistik</button>
+      <button id="navSettings" class="bar-btn" type="button" aria-label="Inställningar">⚙️ Inställn.</button>
+    </div>
+  </nav>
+
+  <script type="module" src="/scripts/main.js"></script>
+</body>
+
+<!--
+  Design Review Notes:
+  - Consolidated inline styles and scripts into module files for maintainability.
+  - Added design tokens and debug state helpers; enable via data-debug="states" on <html>.
+  - PWA assets remain in /public for offline support.
+-->
+</html>
