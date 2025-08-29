@@ -1,0 +1,9 @@
+{
+  "name": "magen",
+  "version": "1.0.0",
+  "description": "Magen offline webapp",
+  "scripts": {
+    "test": "node --test"
+  },
+  "type": "module"
+}
